@@ -1,5 +1,5 @@
-use modular_agent_kit::{
-    AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent, MAK,
+use modular_agent_core::{
+    AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent, ModularAgent,
     async_trait, modular_agent,
 };
 
@@ -29,9 +29,9 @@ struct DisplayTableAgent {
 
 #[async_trait]
 impl AsAgent for DisplayTableAgent {
-    fn new(mak: MAK, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
         Ok(Self {
-            data: AgentData::new(mak, id, spec),
+            data: AgentData::new(ma, id, spec),
         })
     }
 
