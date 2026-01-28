@@ -1,0 +1,22 @@
+[package]
+name = "modular-agent-sqlx"
+version = "0.1.0"
+description = "SQLx Agents for Modular Agent Kit"
+authors = ["Akira Ishino <akira@lumilab.jp>"]
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+
+[dependencies]
+futures-util = "0.3"
+im = "15.1.0"
+modular-agent-kit = "0.21.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
+
+[features]
+default = ["image"]
+image = []
+
+# [patch.crates-io]
+# modular-agent-kit = { path = "../modular-agent-kit/modular-agent-kit" }
