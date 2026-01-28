@@ -1,17 +1,16 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
-use futures_util::TryStreamExt;
 use im::{Vector, hashmap};
 use modular_agent_kit::{
     Agent, AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent, MAK,
     async_trait, modular_agent,
 };
 use sqlx::sqlite::{
-    Sqlite, SqliteArguments, SqliteConnectOptions, SqlitePool, SqlitePoolOptions,
-    SqliteQueryResult, SqliteRow, SqliteValueRef,
+    Sqlite, SqliteArguments, SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow,
+    SqliteValueRef,
 };
-use sqlx::{Arguments, Column, Decode, Either, Row, TypeInfo, ValueRef};
+use sqlx::{Arguments, Column, Decode, Row, TypeInfo, ValueRef};
 
 static DB_MAP: OnceLock<Mutex<BTreeMap<String, SqlitePool>>> = OnceLock::new();
 
@@ -140,23 +139,13 @@ async fn run_sqlx_statement(
     script: &str,
     params: SqliteArguments<'static>,
 ) -> Result<AgentValue, AgentError> {
-    let mut stream = sqlx::query_with(script, params).fetch_many(pool);
-    let mut rows: Vec<SqliteRow> = Vec::new();
-    let mut last_result: Option<SqliteQueryResult> = None;
+    if script_returns_rows(script) {
+        // Use fetch_all for SELECT-like queries
+        let rows: Vec<SqliteRow> = sqlx::query_with(script, params)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| AgentError::IoError(format!("SQLx Error: {}", e)))?;
 
-    while let Some(item) = stream
-        .try_next()
-        .await
-        .map_err(|e| AgentError::IoError(format!("SQLx Error: {}", e)))?
-    {
-        match item {
-            Either::Left(result) => last_result = Some(result),
-            Either::Right(row) => rows.push(row),
-        }
-    }
-
-    let returns_rows = script_returns_rows(script);
-    if !rows.is_empty() || returns_rows {
         let headers: Vec<String> = if let Some(first_row) = rows.first() {
             first_row
                 .columns()
@@ -164,7 +153,6 @@ async fn run_sqlx_statement(
                 .map(|c| c.name().to_string())
                 .collect()
         } else {
-            // If no rows but query should return rows, return empty result with no headers
             Vec::new()
         };
 
@@ -175,14 +163,19 @@ async fn run_sqlx_statement(
             row_values.push_back(sqlx_row_to_agent_value(row)?);
         }
 
-        return Ok(AgentValue::object(hashmap! {
+        Ok(AgentValue::object(hashmap! {
             "headers".into() => headers_value,
             "rows".into() => AgentValue::array(row_values),
-        }));
-    }
+        }))
+    } else {
+        // Use execute for INSERT/UPDATE/DELETE
+        let result = sqlx::query_with(script, params)
+            .execute(pool)
+            .await
+            .map_err(|e| AgentError::IoError(format!("SQLx Error: {}", e)))?;
 
-    let rows_affected = last_result.map(|r| r.rows_affected()).unwrap_or(0);
-    Ok(rows_affected_to_table(rows_affected))
+        Ok(rows_affected_to_table(result.rows_affected()))
+    }
 }
 
 fn rows_affected_to_table(rows_affected: u64) -> AgentValue {
