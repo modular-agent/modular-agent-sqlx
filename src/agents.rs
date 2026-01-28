@@ -6,13 +6,11 @@ use modular_agent_kit::{
     Agent, AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent, MAK,
     async_trait, modular_agent,
 };
-use sqlx::sqlite::{
-    Sqlite, SqliteArguments, SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow,
-    SqliteValueRef,
-};
-use sqlx::{Arguments, Column, Decode, Row, TypeInfo, ValueRef};
+use sqlx::any::{install_default_drivers, AnyArguments, AnyRow, AnyValueRef};
+use sqlx::{Any, AnyPool, Arguments, Column, Decode, Row, TypeInfo, ValueRef};
 
-static DB_MAP: OnceLock<Mutex<BTreeMap<String, SqlitePool>>> = OnceLock::new();
+static DB_MAP: OnceLock<Mutex<BTreeMap<String, AnyPool>>> = OnceLock::new();
+static DRIVERS_INSTALLED: OnceLock<()> = OnceLock::new();
 
 static CATEGORY: &str = "DB/SQLx";
 
@@ -63,37 +61,67 @@ impl AsAgent for SqlxScriptAgent {
     }
 }
 
-async fn get_pool(path: &str) -> Result<SqlitePool, AgentError> {
+async fn get_pool(db: &str) -> Result<AnyPool, AgentError> {
+    // Install database drivers on first use
+    DRIVERS_INSTALLED.get_or_init(install_default_drivers);
+
     let db_map = DB_MAP.get_or_init(|| Mutex::new(BTreeMap::new()));
-    if let Some(pool) = db_map.lock().unwrap().get(path).cloned() {
+    if let Some(pool) = db_map.lock().unwrap().get(db).cloned() {
         return Ok(pool);
     }
 
-    let options = sqlite_connect_options(path)?;
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect_with(options)
+    let url = normalize_db_url(db);
+    let pool = AnyPool::connect(&url)
         .await
         .map_err(|e| AgentError::IoError(format!("SQLx Error creating pool: {}", e)))?;
 
     let mut map_guard = db_map.lock().unwrap();
     let entry = map_guard
-        .entry(path.to_string())
+        .entry(db.to_string())
         .or_insert_with(|| pool.clone());
     Ok(entry.clone())
 }
 
-fn sqlite_connect_options(path: &str) -> Result<SqliteConnectOptions, AgentError> {
-    if path.is_empty() {
-        return Ok(SqliteConnectOptions::new().filename(":memory:"));
+/// Normalize database URL to sqlx format.
+/// - `mysql:...` -> `mysql://...`
+/// - `postgres:...` -> `postgres://...`
+/// - `sqlite:...` -> `sqlite:...`
+/// - (default) path or empty -> `sqlite:path` or `sqlite::memory:`
+fn normalize_db_url(db: &str) -> String {
+    if db.is_empty() {
+        return "sqlite::memory:".to_string();
     }
-    Ok(SqliteConnectOptions::new()
-        .filename(path)
-        .create_if_missing(true))
+
+    if db.starts_with("mysql:") {
+        let rest = db.strip_prefix("mysql:").unwrap();
+        if rest.starts_with("//") {
+            return db.to_string();
+        }
+        return format!("mysql://{}", rest);
+    }
+
+    if db.starts_with("postgres:") || db.starts_with("postgresql:") {
+        let rest = if let Some(r) = db.strip_prefix("postgres:") {
+            r
+        } else {
+            db.strip_prefix("postgresql:").unwrap()
+        };
+        if rest.starts_with("//") {
+            return db.to_string();
+        }
+        return format!("postgres://{}", rest);
+    }
+
+    if db.starts_with("sqlite:") {
+        return db.to_string();
+    }
+
+    // Default: treat as SQLite file path
+    format!("sqlite:{}?mode=rwc", db)
 }
 
-fn build_sqlx_params(value: &AgentValue) -> Result<SqliteArguments<'static>, AgentError> {
-    let mut args = SqliteArguments::default();
+fn build_sqlx_params(value: &AgentValue) -> Result<AnyArguments<'static>, AgentError> {
+    let mut args = AnyArguments::default();
 
     if let Some(arr) = value.as_array() {
         for item in arr.iter() {
@@ -107,7 +135,7 @@ fn build_sqlx_params(value: &AgentValue) -> Result<SqliteArguments<'static>, Age
 }
 
 fn add_agent_value_param(
-    args: &mut SqliteArguments<'static>,
+    args: &mut AnyArguments<'static>,
     value: &AgentValue,
 ) -> Result<(), AgentError> {
     let bind_result = match value {
@@ -135,13 +163,13 @@ fn add_agent_value_param(
 }
 
 async fn run_sqlx_statement(
-    pool: &SqlitePool,
+    pool: &AnyPool,
     script: &str,
-    params: SqliteArguments<'static>,
+    params: AnyArguments<'static>,
 ) -> Result<AgentValue, AgentError> {
     if script_returns_rows(script) {
         // Use fetch_all for SELECT-like queries
-        let rows: Vec<SqliteRow> = sqlx::query_with(script, params)
+        let rows: Vec<AnyRow> = sqlx::query_with(script, params)
             .fetch_all(pool)
             .await
             .map_err(|e| AgentError::IoError(format!("SQLx Error: {}", e)))?;
@@ -222,7 +250,7 @@ fn first_keyword(script: &str) -> Option<String> {
     }
 }
 
-fn sqlx_row_to_agent_value(row: &SqliteRow) -> Result<AgentValue, AgentError> {
+fn sqlx_row_to_agent_value(row: &AnyRow) -> Result<AgentValue, AgentError> {
     let mut cells: Vector<AgentValue> = Vector::new();
     for col_idx in 0..row.len() {
         let cell = row
@@ -234,7 +262,7 @@ fn sqlx_row_to_agent_value(row: &SqliteRow) -> Result<AgentValue, AgentError> {
     Ok(AgentValue::array(cells))
 }
 
-fn sqlx_value_ref_to_agent_value(value: SqliteValueRef<'_>) -> AgentValue {
+fn sqlx_value_ref_to_agent_value(value: AnyValueRef<'_>) -> AgentValue {
     if value.is_null() {
         return AgentValue::unit();
     }
@@ -242,38 +270,45 @@ fn sqlx_value_ref_to_agent_value(value: SqliteValueRef<'_>) -> AgentValue {
     // Store type name as owned String before moving value
     let type_name = value.type_info().name().to_string();
 
-    // SQLite type affinity: NULL, INTEGER, REAL, TEXT, BLOB
-    match type_name.as_str() {
-        "BOOLEAN" => {
-            if let Ok(v) = <bool as Decode<Sqlite>>::decode(value) {
+    // Try to decode based on common type names across databases
+    match type_name.to_uppercase().as_str() {
+        // Boolean types
+        "BOOL" | "BOOLEAN" => {
+            if let Ok(v) = <bool as Decode<Any>>::decode(value) {
                 AgentValue::boolean(v)
             } else {
                 AgentValue::string(type_name)
             }
         }
-        "INTEGER" => {
-            if let Ok(v) = <i64 as Decode<Sqlite>>::decode(value) {
+        // Integer types (SQLite, MySQL, PostgreSQL)
+        "INTEGER" | "INT" | "INT4" | "INT8" | "BIGINT" | "SMALLINT" | "TINYINT" | "MEDIUMINT" => {
+            if let Ok(v) = <i64 as Decode<Any>>::decode(value) {
                 AgentValue::integer(v)
             } else {
                 AgentValue::string(type_name)
             }
         }
-        "REAL" => {
-            if let Ok(v) = <f64 as Decode<Sqlite>>::decode(value) {
+        // Float types
+        "REAL" | "FLOAT" | "FLOAT4" | "FLOAT8" | "DOUBLE" | "DOUBLE PRECISION" | "NUMERIC"
+        | "DECIMAL" => {
+            if let Ok(v) = <f64 as Decode<Any>>::decode(value) {
                 AgentValue::number(v)
             } else {
                 AgentValue::string(type_name)
             }
         }
-        "TEXT" => {
-            if let Ok(v) = <String as Decode<Sqlite>>::decode(value) {
+        // Text types
+        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" | "LONGTEXT" | "MEDIUMTEXT"
+        | "TINYTEXT" => {
+            if let Ok(v) = <String as Decode<Any>>::decode(value) {
                 AgentValue::string(v)
             } else {
                 AgentValue::string(type_name)
             }
         }
-        "BLOB" => {
-            if let Ok(v) = <Vec<u8> as Decode<Sqlite>>::decode(value) {
+        // Blob types
+        "BLOB" | "BYTEA" | "BINARY" | "VARBINARY" | "LONGBLOB" | "MEDIUMBLOB" | "TINYBLOB" => {
+            if let Ok(v) = <Vec<u8> as Decode<Any>>::decode(value) {
                 let arr: Vector<AgentValue> = v
                     .iter()
                     .map(|b: &u8| AgentValue::integer(*b as i64))
@@ -285,7 +320,7 @@ fn sqlx_value_ref_to_agent_value(value: SqliteValueRef<'_>) -> AgentValue {
         }
         _ => {
             // Fallback: try to decode as string
-            if let Ok(v) = <String as Decode<Sqlite>>::decode(value) {
+            if let Ok(v) = <String as Decode<Any>>::decode(value) {
                 AgentValue::string(v)
             } else {
                 AgentValue::string(type_name)
