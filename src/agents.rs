@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
 use im::{Vector, hashmap};
-use modular_agent_kit::{
-    Agent, AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent, MAK,
-    async_trait, modular_agent,
+use modular_agent_core::{
+    Agent, AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent,
+    ModularAgent, async_trait, modular_agent,
 };
-use sqlx::any::{install_default_drivers, AnyArguments, AnyRow, AnyValueRef};
+use sqlx::any::{AnyArguments, AnyRow, AnyValueRef, install_default_drivers};
 use sqlx::{Any, AnyPool, Arguments, Column, Decode, Row, TypeInfo, ValueRef};
 
 static DB_MAP: OnceLock<Mutex<BTreeMap<String, AnyPool>>> = OnceLock::new();
@@ -35,9 +35,9 @@ struct SqlxScriptAgent {
 
 #[async_trait]
 impl AsAgent for SqlxScriptAgent {
-    fn new(mak: MAK, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
         Ok(Self {
-            data: AgentData::new(mak, id, spec),
+            data: AgentData::new(ma, id, spec),
         })
     }
 
@@ -341,9 +341,9 @@ struct RowsAgent {
 
 #[async_trait]
 impl AsAgent for RowsAgent {
-    fn new(mak: MAK, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
         Ok(Self {
-            data: AgentData::new(mak, id, spec),
+            data: AgentData::new(ma, id, spec),
         })
     }
 
@@ -374,9 +374,9 @@ struct RowAgent {
 
 #[async_trait]
 impl AsAgent for RowAgent {
-    fn new(mak: MAK, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
         Ok(Self {
-            data: AgentData::new(mak, id, spec),
+            data: AgentData::new(ma, id, spec),
         })
     }
 
@@ -411,9 +411,9 @@ struct SelectAgent {
 
 #[async_trait]
 impl AsAgent for SelectAgent {
-    fn new(mak: MAK, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
         Ok(Self {
-            data: AgentData::new(mak, id, spec),
+            data: AgentData::new(ma, id, spec),
         })
     }
 

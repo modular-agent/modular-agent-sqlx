@@ -1,6 +1,6 @@
-# SQLx Agents for Modular Agent Kit
+# SQLx Agents for Modular Agent
 
-SQLx-based database agents for Modular Agent Kit. Supports SQLite, MySQL, and PostgreSQL.
+SQLx-based database agents for Modular Agent. Supports SQLite, MySQL, and PostgreSQL.
 
 ## Database Connection
 
