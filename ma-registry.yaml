@@ -1,0 +1,6 @@
+name: modular-agent-sqlx
+description: SQL database agents (PostgreSQL, MySQL, SQLite)
+conflicts:
+  - with: modular-agent-cozodb
+    reason: sqlite3 native link conflict
+default_for: [desktop, cli]
