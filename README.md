@@ -1,6 +1,6 @@
-# SQLx Agents for Modular Agent
+# SQLx Modules for Modular Agent
 
-SQLx-based database agents for Modular Agent. Supports SQLite, MySQL, and PostgreSQL.
+SQLx-based database modules for Modular Agent. Supports SQLite, MySQL, and PostgreSQL.
 
 ## Database Connection
 
@@ -35,7 +35,7 @@ db: "postgres:user:password@localhost/mydb"
 db: "postgres://user:password@localhost/mydb"
 ```
 
-## Agents
+## Modules
 
 ### SQLx Script
 

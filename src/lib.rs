@@ -1,4 +1,4 @@
 #![recursion_limit = "256"]
 
-pub mod agents;
 pub mod display;
+pub mod modules;

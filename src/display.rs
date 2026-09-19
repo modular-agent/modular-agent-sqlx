@@ -1,5 +1,5 @@
 use modular_agent_core::{
-    AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent, ModularAgent,
+    AsModule, ModularAgent, ModuleContext, ModuleData, ModuleOutput, ModuleSpec, Result, Value,
     async_trait, modular_agent,
 };
 
@@ -23,30 +23,25 @@ static CONFIG_TABLE: &str = "table";
         hide_title,
     ),
 )]
-struct DisplayTableAgent {
-    data: AgentData,
+struct DisplayTableModule {
+    data: ModuleData,
 }
 
 #[async_trait]
-impl AsAgent for DisplayTableAgent {
-    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+impl AsModule for DisplayTableModule {
+    fn new(ma: ModularAgent, id: String, spec: ModuleSpec) -> Result<Self> {
         Ok(Self {
-            data: AgentData::new(ma, id, spec),
+            data: ModuleData::new(ma, id, spec),
         })
     }
 
-    async fn process(
-        &mut self,
-        _ctx: AgentContext,
-        _port: String,
-        value: AgentValue,
-    ) -> Result<(), AgentError> {
+    async fn process(&mut self, _ctx: ModuleContext, _port: String, value: Value) -> Result<()> {
         let headers = value.get_array("headers");
         let rows = value.get_array("rows");
 
         let table_html = generate_html_table(headers, rows);
 
-        self.emit_config_updated(CONFIG_TABLE, AgentValue::string(table_html));
+        self.emit_config_updated(CONFIG_TABLE, Value::string(table_html));
         Ok(())
     }
 }
@@ -66,19 +61,19 @@ fn escape_html(text: &str) -> String {
     escaped
 }
 
-fn cozo_cell_to_text(value: &AgentValue) -> String {
+fn cozo_cell_to_text(value: &Value) -> String {
     match value {
-        AgentValue::Unit => "null".to_string(),
-        AgentValue::Boolean(b) => b.to_string(),
-        AgentValue::Integer(i) => i.to_string(),
-        AgentValue::Number(n) => n.to_string(),
-        AgentValue::String(s) => s.to_string(),
-        AgentValue::Array(arr) => {
+        Value::Unit => "null".to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Integer(i) => i.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.to_string(),
+        Value::Array(arr) => {
             let rendered: Vec<String> = arr.iter().map(cozo_cell_to_text).collect();
             format!("[{}]", rendered.join(", "))
         }
-        AgentValue::Object(_) => serde_json::to_string(&value.to_json()).unwrap_or_default(),
-        AgentValue::Tensor(t) => {
+        Value::Object(_) => serde_json::to_string(&value.to_json()).unwrap_or_default(),
+        Value::Tensor(t) => {
             // show only the first and last several elements of the tensor, if large.
             let size = t.len();
             let elements_to_show = 5;
@@ -111,8 +106,8 @@ fn cozo_cell_to_text(value: &AgentValue) -> String {
 }
 
 fn generate_html_table(
-    headers: Option<&im::Vector<AgentValue>>,
-    rows: Option<&im::Vector<AgentValue>>,
+    headers: Option<&im::Vector<Value>>,
+    rows: Option<&im::Vector<Value>>,
 ) -> String {
     let mut html = String::new();
     html.push_str("<table border=\"1\" style=\"border-collapse:collapse;\">\n");

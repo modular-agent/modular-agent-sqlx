@@ -3,8 +3,8 @@ use std::sync::{Mutex, OnceLock};
 
 use im::{Vector, hashmap};
 use modular_agent_core::{
-    Agent, AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent,
-    ModularAgent, async_trait, modular_agent,
+    AsModule, Error, ModularAgent, Module, ModuleContext, ModuleData, ModuleOutput, ModuleSpec,
+    Result, Value, async_trait, modular_agent,
 };
 use sqlx::any::{AnyArguments, AnyRow, AnyValueRef, install_default_drivers};
 use sqlx::{Any, AnyPool, Arguments, Column, Decode, Row, TypeInfo, ValueRef};
@@ -29,24 +29,19 @@ static CONFIG_SCRIPT: &str = "script";
     string_config(name = CONFIG_DB),
     text_config(name = CONFIG_SCRIPT)
 )]
-struct SqlxScriptAgent {
-    data: AgentData,
+struct SqlxScriptModule {
+    data: ModuleData,
 }
 
 #[async_trait]
-impl AsAgent for SqlxScriptAgent {
-    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+impl AsModule for SqlxScriptModule {
+    fn new(ma: ModularAgent, id: String, spec: ModuleSpec) -> Result<Self> {
         Ok(Self {
-            data: AgentData::new(ma, id, spec),
+            data: ModuleData::new(ma, id, spec),
         })
     }
 
-    async fn process(
-        &mut self,
-        ctx: AgentContext,
-        _port: String,
-        value: AgentValue,
-    ) -> Result<(), AgentError> {
+    async fn process(&mut self, ctx: ModuleContext, _port: String, value: Value) -> Result<()> {
         let config = self.configs()?;
         let script = config.get_string(CONFIG_SCRIPT)?;
         if script.is_empty() {
@@ -61,7 +56,7 @@ impl AsAgent for SqlxScriptAgent {
     }
 }
 
-async fn get_pool(db: &str) -> Result<AnyPool, AgentError> {
+async fn get_pool(db: &str) -> Result<AnyPool> {
     // Install database drivers on first use
     DRIVERS_INSTALLED.get_or_init(install_default_drivers);
 
@@ -73,7 +68,7 @@ async fn get_pool(db: &str) -> Result<AnyPool, AgentError> {
     let url = normalize_db_url(db);
     let pool = AnyPool::connect(&url)
         .await
-        .map_err(|e| AgentError::IoError(format!("SQLx Error creating pool: {}", e)))?;
+        .map_err(|e| Error::IoError(format!("SQLx Error creating pool: {}", e)))?;
 
     let mut map_guard = db_map.lock().unwrap();
     let entry = map_guard
@@ -120,59 +115,56 @@ fn normalize_db_url(db: &str) -> String {
     format!("sqlite:{}?mode=rwc", db)
 }
 
-fn build_sqlx_params(value: &AgentValue) -> Result<AnyArguments<'static>, AgentError> {
+fn build_sqlx_params(value: &Value) -> Result<AnyArguments<'static>> {
     let mut args = AnyArguments::default();
 
     if let Some(arr) = value.as_array() {
         for item in arr.iter() {
-            add_agent_value_param(&mut args, item)?;
+            add_value_param(&mut args, item)?;
         }
         return Ok(args);
     }
-    add_agent_value_param(&mut args, value)?;
+    add_value_param(&mut args, value)?;
 
     Ok(args)
 }
 
-fn add_agent_value_param(
-    args: &mut AnyArguments<'static>,
-    value: &AgentValue,
-) -> Result<(), AgentError> {
+fn add_value_param(args: &mut AnyArguments<'static>, value: &Value) -> Result<()> {
     let bind_result = match value {
-        AgentValue::Unit => args.add(Option::<i64>::None),
-        AgentValue::Boolean(b) => args.add(*b),
-        AgentValue::Integer(i) => args.add(*i),
-        AgentValue::Number(n) => args.add(*n),
-        AgentValue::String(s) => args.add(s.as_ref().clone()),
-        AgentValue::Array(_) | AgentValue::Object(_) | AgentValue::Tensor(_) => {
+        Value::Unit => args.add(Option::<i64>::None),
+        Value::Boolean(b) => args.add(*b),
+        Value::Integer(i) => args.add(*i),
+        Value::Number(n) => args.add(*n),
+        Value::String(s) => args.add(s.as_ref().clone()),
+        Value::Array(_) | Value::Object(_) | Value::Tensor(_) => {
             let json = serde_json::to_string(&value.to_json()).unwrap_or_default();
             args.add(json)
         }
-        AgentValue::Message(_) | AgentValue::Error(_) => {
+        Value::Message(_) | Value::Error(_) => {
             let json = serde_json::to_string(&value.to_json()).unwrap_or_default();
             args.add(json)
         }
         #[cfg(feature = "image")]
-        AgentValue::Image(_) => {
+        Value::Image(_) => {
             let json = serde_json::to_string(&value.to_json()).unwrap_or_default();
             args.add(json)
         }
     };
 
-    bind_result.map_err(|e| AgentError::IoError(format!("SQLx Error binding param: {}", e)))
+    bind_result.map_err(|e| Error::IoError(format!("SQLx Error binding param: {}", e)))
 }
 
 async fn run_sqlx_statement(
     pool: &AnyPool,
     script: &str,
     params: AnyArguments<'static>,
-) -> Result<AgentValue, AgentError> {
+) -> Result<Value> {
     if script_returns_rows(script) {
         // Use fetch_all for SELECT-like queries
         let rows: Vec<AnyRow> = sqlx::query_with(script, params)
             .fetch_all(pool)
             .await
-            .map_err(|e| AgentError::IoError(format!("SQLx Error: {}", e)))?;
+            .map_err(|e| Error::IoError(format!("SQLx Error: {}", e)))?;
 
         let headers: Vec<String> = if let Some(first_row) = rows.first() {
             first_row
@@ -184,34 +176,33 @@ async fn run_sqlx_statement(
             Vec::new()
         };
 
-        let headers_value =
-            AgentValue::array(headers.into_iter().map(AgentValue::string).collect());
-        let mut row_values: Vector<AgentValue> = Vector::new();
+        let headers_value = Value::array(headers.into_iter().map(Value::string).collect());
+        let mut row_values: Vector<Value> = Vector::new();
         for row in &rows {
-            row_values.push_back(sqlx_row_to_agent_value(row)?);
+            row_values.push_back(sqlx_row_to_value(row)?);
         }
 
-        Ok(AgentValue::object(hashmap! {
+        Ok(Value::object(hashmap! {
             "headers".into() => headers_value,
-            "rows".into() => AgentValue::array(row_values),
+            "rows".into() => Value::array(row_values),
         }))
     } else {
         // Use execute for INSERT/UPDATE/DELETE
         let result = sqlx::query_with(script, params)
             .execute(pool)
             .await
-            .map_err(|e| AgentError::IoError(format!("SQLx Error: {}", e)))?;
+            .map_err(|e| Error::IoError(format!("SQLx Error: {}", e)))?;
 
         Ok(rows_affected_to_table(result.rows_affected()))
     }
 }
 
-fn rows_affected_to_table(rows_affected: u64) -> AgentValue {
+fn rows_affected_to_table(rows_affected: u64) -> Value {
     let rows_affected = i64::try_from(rows_affected).unwrap_or(i64::MAX);
-    let headers = AgentValue::array(Vector::unit(AgentValue::string("rows_affected")));
-    let row = AgentValue::array(Vector::unit(AgentValue::integer(rows_affected)));
-    let rows = AgentValue::array(Vector::unit(row));
-    AgentValue::object(hashmap! {
+    let headers = Value::array(Vector::unit(Value::string("rows_affected")));
+    let row = Value::array(Vector::unit(Value::integer(rows_affected)));
+    let rows = Value::array(Vector::unit(row));
+    Value::object(hashmap! {
         "headers".into() => headers,
         "rows".into() => rows,
     })
@@ -250,21 +241,21 @@ fn first_keyword(script: &str) -> Option<String> {
     }
 }
 
-fn sqlx_row_to_agent_value(row: &AnyRow) -> Result<AgentValue, AgentError> {
-    let mut cells: Vector<AgentValue> = Vector::new();
+fn sqlx_row_to_value(row: &AnyRow) -> Result<Value> {
+    let mut cells: Vector<Value> = Vector::new();
     for col_idx in 0..row.len() {
         let cell = row
             .try_get_raw(col_idx)
-            .map(sqlx_value_ref_to_agent_value)
-            .map_err(|e| AgentError::IoError(format!("SQLx Error: {}", e)))?;
+            .map(sqlx_value_ref_to_value)
+            .map_err(|e| Error::IoError(format!("SQLx Error: {}", e)))?;
         cells.push_back(cell);
     }
-    Ok(AgentValue::array(cells))
+    Ok(Value::array(cells))
 }
 
-fn sqlx_value_ref_to_agent_value(value: AnyValueRef<'_>) -> AgentValue {
+fn sqlx_value_ref_to_value(value: AnyValueRef<'_>) -> Value {
     if value.is_null() {
-        return AgentValue::unit();
+        return Value::unit();
     }
 
     // Store type name as owned String before moving value
@@ -275,55 +266,52 @@ fn sqlx_value_ref_to_agent_value(value: AnyValueRef<'_>) -> AgentValue {
         // Boolean types
         "BOOL" | "BOOLEAN" => {
             if let Ok(v) = <bool as Decode<Any>>::decode(value) {
-                AgentValue::boolean(v)
+                Value::boolean(v)
             } else {
-                AgentValue::string(type_name)
+                Value::string(type_name)
             }
         }
         // Integer types (SQLite, MySQL, PostgreSQL)
         "INTEGER" | "INT" | "INT4" | "INT8" | "BIGINT" | "SMALLINT" | "TINYINT" | "MEDIUMINT" => {
             if let Ok(v) = <i64 as Decode<Any>>::decode(value) {
-                AgentValue::integer(v)
+                Value::integer(v)
             } else {
-                AgentValue::string(type_name)
+                Value::string(type_name)
             }
         }
         // Float types
         "REAL" | "FLOAT" | "FLOAT4" | "FLOAT8" | "DOUBLE" | "DOUBLE PRECISION" | "NUMERIC"
         | "DECIMAL" => {
             if let Ok(v) = <f64 as Decode<Any>>::decode(value) {
-                AgentValue::number(v)
+                Value::number(v)
             } else {
-                AgentValue::string(type_name)
+                Value::string(type_name)
             }
         }
         // Text types
         "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" | "LONGTEXT" | "MEDIUMTEXT"
         | "TINYTEXT" => {
             if let Ok(v) = <String as Decode<Any>>::decode(value) {
-                AgentValue::string(v)
+                Value::string(v)
             } else {
-                AgentValue::string(type_name)
+                Value::string(type_name)
             }
         }
         // Blob types
         "BLOB" | "BYTEA" | "BINARY" | "VARBINARY" | "LONGBLOB" | "MEDIUMBLOB" | "TINYBLOB" => {
             if let Ok(v) = <Vec<u8> as Decode<Any>>::decode(value) {
-                let arr: Vector<AgentValue> = v
-                    .iter()
-                    .map(|b: &u8| AgentValue::integer(*b as i64))
-                    .collect();
-                AgentValue::array(arr)
+                let arr: Vector<Value> = v.iter().map(|b: &u8| Value::integer(*b as i64)).collect();
+                Value::array(arr)
             } else {
-                AgentValue::string(type_name)
+                Value::string(type_name)
             }
         }
         _ => {
             // Fallback: try to decode as string
             if let Ok(v) = <String as Decode<Any>>::decode(value) {
-                AgentValue::string(v)
+                Value::string(v)
             } else {
-                AgentValue::string(type_name)
+                Value::string(type_name)
             }
         }
     }
@@ -335,28 +323,23 @@ fn sqlx_value_ref_to_agent_value(value: AnyValueRef<'_>) -> AgentValue {
     inputs = [PORT_TABLE],
     outputs = [PORT_ARRAY],
 )]
-struct RowsAgent {
-    data: AgentData,
+struct RowsModule {
+    data: ModuleData,
 }
 
 #[async_trait]
-impl AsAgent for RowsAgent {
-    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+impl AsModule for RowsModule {
+    fn new(ma: ModularAgent, id: String, spec: ModuleSpec) -> Result<Self> {
         Ok(Self {
-            data: AgentData::new(ma, id, spec),
+            data: ModuleData::new(ma, id, spec),
         })
     }
 
-    async fn process(
-        &mut self,
-        ctx: AgentContext,
-        _port: String,
-        value: AgentValue,
-    ) -> Result<(), AgentError> {
+    async fn process(&mut self, ctx: ModuleContext, _port: String, value: Value) -> Result<()> {
         let rows = value
             .get_array("rows")
-            .ok_or_else(|| AgentError::InvalidValue("Missing 'rows' field".to_string()))?;
-        self.output(ctx, PORT_ARRAY, AgentValue::array(rows.clone()))
+            .ok_or_else(|| Error::InvalidValue("Missing 'rows' field".to_string()))?;
+        self.output(ctx, PORT_ARRAY, Value::array(rows.clone()))
             .await
     }
 }
@@ -368,32 +351,25 @@ impl AsAgent for RowsAgent {
     outputs = [PORT_ARRAY],
     integer_config(name = "index"),
 )]
-struct RowAgent {
-    data: AgentData,
+struct RowModule {
+    data: ModuleData,
 }
 
 #[async_trait]
-impl AsAgent for RowAgent {
-    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+impl AsModule for RowModule {
+    fn new(ma: ModularAgent, id: String, spec: ModuleSpec) -> Result<Self> {
         Ok(Self {
-            data: AgentData::new(ma, id, spec),
+            data: ModuleData::new(ma, id, spec),
         })
     }
 
-    async fn process(
-        &mut self,
-        ctx: AgentContext,
-        _port: String,
-        value: AgentValue,
-    ) -> Result<(), AgentError> {
+    async fn process(&mut self, ctx: ModuleContext, _port: String, value: Value) -> Result<()> {
         let index = self.configs()?.get_integer("index")? as usize;
         let row = value
             .get_array("rows")
-            .ok_or_else(|| AgentError::InvalidValue("Missing 'rows' field".to_string()))?
+            .ok_or_else(|| Error::InvalidValue("Missing 'rows' field".to_string()))?
             .get(index)
-            .ok_or_else(|| {
-                AgentError::InvalidValue(format!("Row index {} out of bounds", index))
-            })?;
+            .ok_or_else(|| Error::InvalidValue(format!("Row index {} out of bounds", index)))?;
         self.output(ctx, PORT_ARRAY, row.clone()).await
     }
 }
@@ -405,24 +381,19 @@ impl AsAgent for RowAgent {
     outputs = [PORT_ARRAY],
     string_config(name = "cols"),
 )]
-struct SelectAgent {
-    data: AgentData,
+struct SelectModule {
+    data: ModuleData,
 }
 
 #[async_trait]
-impl AsAgent for SelectAgent {
-    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+impl AsModule for SelectModule {
+    fn new(ma: ModularAgent, id: String, spec: ModuleSpec) -> Result<Self> {
         Ok(Self {
-            data: AgentData::new(ma, id, spec),
+            data: ModuleData::new(ma, id, spec),
         })
     }
 
-    async fn process(
-        &mut self,
-        ctx: AgentContext,
-        _port: String,
-        value: AgentValue,
-    ) -> Result<(), AgentError> {
+    async fn process(&mut self, ctx: ModuleContext, _port: String, value: Value) -> Result<()> {
         let cols = self
             .configs()?
             .get_string("cols")?
@@ -431,42 +402,37 @@ impl AsAgent for SelectAgent {
             .collect::<Vec<String>>();
         let headers = value
             .get_array("headers")
-            .ok_or_else(|| AgentError::InvalidValue("Missing 'headers' field".to_string()))?;
+            .ok_or_else(|| Error::InvalidValue("Missing 'headers' field".to_string()))?;
         let col_indices: Vec<usize> = cols
             .iter()
             .map(|col| {
                 headers
                     .iter()
                     .position(|h| h.as_str().map_or(false, |hs| hs == col))
-                    .ok_or_else(|| AgentError::InvalidValue(format!("Column '{}' not found", col)))
+                    .ok_or_else(|| Error::InvalidValue(format!("Column '{}' not found", col)))
             })
-            .collect::<Result<Vec<usize>, AgentError>>()?;
+            .collect::<Result<Vec<usize>>>()?;
 
         let arr = value
             .get_array("rows")
-            .ok_or_else(|| AgentError::InvalidValue("Missing 'rows' field".to_string()))?
+            .ok_or_else(|| Error::InvalidValue("Missing 'rows' field".to_string()))?
             .iter()
             .map(|row| {
                 let row_array = row
                     .as_array()
-                    .ok_or_else(|| AgentError::InvalidValue("Row is not an array".to_string()))?;
-                let selected_cells: im::Vector<AgentValue> = col_indices
+                    .ok_or_else(|| Error::InvalidValue("Row is not an array".to_string()))?;
+                let selected_cells: im::Vector<Value> = col_indices
                     .iter()
-                    .map(|&i| {
-                        row_array
-                            .get(i)
-                            .cloned()
-                            .unwrap_or_else(|| AgentValue::unit())
-                    })
+                    .map(|&i| row_array.get(i).cloned().unwrap_or_else(|| Value::unit()))
                     .collect();
-                Ok(AgentValue::array(selected_cells))
+                Ok(Value::array(selected_cells))
             })
-            .collect::<Result<im::Vector<AgentValue>, AgentError>>()?;
+            .collect::<Result<im::Vector<Value>>>()?;
 
         if arr.len() == 1 {
             self.output(ctx, PORT_ARRAY, arr[0].clone()).await
         } else {
-            self.output(ctx, PORT_ARRAY, AgentValue::array(arr)).await
+            self.output(ctx, PORT_ARRAY, Value::array(arr)).await
         }
     }
 }
